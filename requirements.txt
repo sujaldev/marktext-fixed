@@ -1,0 +1,5 @@
+mistune
+html5-parser # install lxml seperately with --no-binary flag
+
+pysdl2
+skia-python
