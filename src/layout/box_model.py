@@ -28,6 +28,15 @@ if __name__ == '__main__':
 else:
     from .default_stylesheet import *
 
+from random import choice
+from string import hexdigits
+
+
+def random_color():
+    seed = hexdigits.replace("abcdef", "")
+    return int("".join(choice(seed) for i in range(6)) + "FF", 16)
+
+
 # noinspection PyProtectedMember
 etree_node = etree._Element
 
@@ -69,6 +78,29 @@ class LayoutBox:
         # will be defined by child classes due to dependency on box type
         pass
 
+    def handle_first_text(self):
+        first_text = self.dom_node.text
+        if first_text:
+            self.children.append(TextLayoutBox(first_text, self))
+
+    def show_tree(self, indent=0):
+        print("\t" * indent + str(self))
+        for box in self.children:
+            box.show_tree(indent=indent + 1)
+
+    def paint_self(self, canvas: skia.Canvas):
+        draw_layout_box(canvas, self.border)
+        draw_layout_box(canvas, self.main_box)
+
+    def paint(self, canvas: skia.Canvas):
+        self.paint_self(canvas)
+        for box in self.children:
+            box.paint(canvas)
+
+    def __repr__(self):
+        class_name = self.__class__.__name__
+        return f"<{class_name}::{self.dom_node.tag} | {self.main_box}>"
+
 
 class Rectangle:
     def __init__(self):
@@ -90,6 +122,9 @@ class Rectangle:
         dimensions = Dimensions(self.x1, self.y1, self.x2, self.y2, self.width, self.height)
         return dimensions
 
+    def __repr__(self):
+        return f"x1: {self.x1}, y1: {self.y1}, width: {self.width}, height: {self.height}"
+
 
 class BoxProperty:
     def __init__(self, parent_box: LayoutBox, property_name: str):
@@ -110,6 +145,8 @@ class BoxProperty:
 
     def set_properties_from_style(self):
         style = self.parent_box.style
+        if not style:
+            return
         self.top = style.get(self.property_name + "-top", 0)
         self.right = style.get(self.property_name + "-right", 0)
         self.bottom = style.get(self.property_name + "-bottom", 0)
@@ -156,6 +193,26 @@ class Dimensions:
         self.width, self.height = width, height
 
 
+class DocumentLayout(LayoutBox):
+    def __init__(self, root_node, x1=0, y1=0, width=500, height=500):
+        super().__init__(root_node)
+        self.main_box.x1 = x1
+        self.main_box.y1 = y1
+        self.main_box.width = width
+        self.main_box.height = height
+
+    def layout(self):
+        body_node = self.find_body_node()
+        layout_box = BlockLayoutBox(body_node, parent_box=self)
+        layout_box.layout()
+        self.children.append(layout_box)
+
+    def find_body_node(self):
+        for node in self.dom_node.getchildren():  # type: etree_node
+            if node.tag == "body":
+                return node
+
+
 class BlockLayoutBox(LayoutBox):
     def init_box(self):
         if self.has_parent:
@@ -168,15 +225,14 @@ class BlockLayoutBox(LayoutBox):
         parent_dimensions = self.parent_box.padding.box_dimensions
         self.main_box.x1 = parent_dimensions.x1 + self.margin.left
         self.main_box.y1 = parent_dimensions.y1 + self.margin.top
-        self.main_box.width = parent_dimensions.x2 - self.margin.right
+        self.main_box.width = parent_dimensions.x2 - self.margin.right - self.margin.left
 
     def position_after_last_sibling(self):
         last_sibling_dimensions = self.last_sibling_box.margin.box_dimensions
         self.main_box.y1 = last_sibling_dimensions.y2
 
     def layout(self):
-        first_text = self.dom_node.text
-        self.children.append(TextLayoutBox(first_text, self))
+        self.handle_first_text()
 
         last_sibling: LayoutBox | None = None
         for child_dom_node in self.dom_node.iterchildren():  # type: etree_node
@@ -235,8 +291,7 @@ class InlineLayoutBox(LayoutBox):
         self.main_box.y1 = last_sibling_dimensions.y1  # margin top and bottom does not work on inline elements
 
     def layout(self):
-        first_text = self.dom_node.text
-        self.children.append(TextLayoutBox(first_text, self))
+        self.handle_first_text()
 
         last_sibling: LayoutBox | None = None
         for child_dom_node in self.dom_node.iterchildren():  # type: etree_node
@@ -284,15 +339,14 @@ class InlineLayoutBox(LayoutBox):
 
 class TextLayoutBox(LayoutBox):
     DEFAULT_FONT_SIZE = 18
-    DEFAULT_TEXT_COLOR = skia.ColorBLACK
     DEFAULT_FONT = skia.Font(None, size=DEFAULT_FONT_SIZE)
     DEFAULT_LINE_HEIGHT = DEFAULT_FONT.getMetrics().fDescent - DEFAULT_FONT.getMetrics().fAscent
 
     def __init__(self, text: str, parent_box=None, last_sibling_box=None, font_styles: Tuple[str] = ()):
-        super().__init__(None, None, parent_box, last_sibling_box)
         self.text = text.split(" ")
         self.text_nodes: List[TextNode] = []
         self.font_styles = font_styles
+        super().__init__(None, None, parent_box, last_sibling_box)
         self.init_box()
 
     def init_cursor(self):
@@ -332,16 +386,38 @@ class TextLayoutBox(LayoutBox):
 
         self.main_box = self.text_nodes[-1].bounding_box
 
+    def paint(self, canvas: skia.Canvas):
+        for text_node in self.text_nodes:
+            text_node.paint(canvas)
+
+    def __repr__(self):
+        class_name = self.__class__.__name__
+        return f"<{class_name}::{self.text}>"
+
 
 class TextNode:
+    DEFAULT_FONT_SIZE = 18
+    DEFAULT_FONT = skia.Font(None, size=DEFAULT_FONT_SIZE)
+    DEFAULT_TEXT_COLOR = skia.ColorBLACK
+
     def __init__(self, text: str, width: int, line_height: int):
         self.text = text
         self.bounding_box = Rectangle()
         self.bounding_box.width = width
         self.bounding_box.height = line_height
 
+    def paint(self, canvas: skia.Canvas):
+        paint = skia.Paint(
+            AntiAlias=True,
+            Color=self.DEFAULT_TEXT_COLOR
+        )
+        text_blob = skia.TextBlob(self.text, self.DEFAULT_FONT)
+        box = self.bounding_box
+        # noinspection PyTypeChecker
+        canvas.drawTextBlob(text_blob, box.x1, box.y2, paint)
 
-def get_node_layout_and_style(node) -> Type[BlockLayoutBox] | Type[InlineLayoutBox]:
+
+def get_node_layout_and_style(node: etree_node) -> Type[BlockLayoutBox] | Type[InlineLayoutBox]:
     tag_name = node.tag
     if tag_name in BLOCK_ELEMENTS:
         layout = BlockLayoutBox
@@ -349,3 +425,19 @@ def get_node_layout_and_style(node) -> Type[BlockLayoutBox] | Type[InlineLayoutB
         layout = InlineLayoutBox
 
     return layout
+
+
+def make_skia_rect_from_dimensions(layout_box: Rectangle | BoxProperty) -> skia.Rect:
+    box = layout_box.box_dimensions
+    skia_box = skia.Rect(
+        box.x1, box.y1,
+        box.x2, box.y2
+    )
+    return skia_box
+
+
+def draw_layout_box(canvas: skia.Canvas, layout_box: Rectangle | BoxProperty, color: skia.Paint | None = None):
+    rect = make_skia_rect_from_dimensions(layout_box)
+    color = skia.Paint(random_color()) if color is None else color
+    # noinspection PyTypeChecker
+    canvas.drawRect(rect, color)
